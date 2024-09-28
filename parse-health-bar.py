@@ -15,6 +15,7 @@ data_socket.bind("tcp://*:5556")
 
 
 is_running = False
+data_filter_tag = ""
 last_health_data_sent = {
     "player1": 100,
     "player2": 100,
@@ -30,6 +31,13 @@ player_wait_frames = {
     "player5": 0,
 }
 player_recovery_wait_frames = {
+    "player1": 0,
+    "player2": 0,
+    "player3": 0,
+    "player4": 0,
+    "player5": 0,
+}
+player_dead_wait_frames = {
     "player1": 0,
     "player2": 0,
     "player3": 0,
@@ -68,32 +76,6 @@ def process_grayscale_image(frame):
     return -1
 
 
-def is_image_red(frame):
-    dim = (frame.shape[1], frame.shape[0])
-
-    resized_frame = cv2.resize(frame, dim, interpolation=cv2.INTER_AREA)
-
-    hsv = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2HSV)
-    lower_red = np.array([115, 25, 14])
-    upper_red = np.array([255, 0, 0])
-
-    mask = cv2.inRange(hsv, lower_red, upper_red)
-    res = cv2.bitwise_and(frame, frame, mask=mask)
-
-    grayscale_frame = cv2.cvtColor(res, cv2.COLOR_BGR2GRAY)
-
-    blurred_frame = cv2.GaussianBlur(grayscale_frame, (5, 5), 0)
-
-    _, thresholded = cv2.threshold(blurred_frame, 50, 255, cv2.THRESH_BINARY)
-
-    contours, _ = cv2.findContours(thresholded, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-    if contours:
-        return -2
-
-    return -1
-
-
 def parse_hp(hp_area):
     width = int(hp_area.shape[1] * 5)
     height = int(hp_area.shape[0] * 5)
@@ -103,8 +85,6 @@ def parse_hp(hp_area):
     grayscale_resized = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
 
     health_data = process_grayscale_image(grayscale_resized)
-    if health_data == -1:
-        health_data = is_image_red(hp_area)
     return health_data
 
 
@@ -171,6 +151,7 @@ def capture_screen(region=None):
 def send_health_data(health_bars):
     global last_health_data_sent
     global player_wait_frames
+    global data_filter_tag
     health_data = {
         "player1": health_bars[0],
         "player2": health_bars[1],
@@ -181,54 +162,137 @@ def send_health_data(health_bars):
     sending_data = {}
 
     for player, new_health in health_data.items():
+        if player_wait_frames[player] != 0:
+            print(f"player wait frames : {player_wait_frames[player]}")
+        if player_recovery_wait_frames[player] != 0:
+            print(
+                f"player recovery wait frames : {player_recovery_wait_frames[player]}"
+            )
+        if player_dead_wait_frames[player] != 0:
+            print(
+                f"player recovery wait frames : {player_recovery_wait_frames[player]}"
+            )
         if (
+            last_health_data_sent[player] > 0
+            and last_health_data_sent[player] <= 33
+            and new_health == -1
+        ):
+            if data_filter_tag != "strict_null_error":
+                print("\n")
+                print("New strict null error check...")
+                data_filter_tag = "strict_null_error"
+                player_wait_frames[player] = 0
+            print("\n")
+            print(
+                f"last health bar sent for {player} : {last_health_data_sent[player]}"
+            )
+            print("\n")
+            if player_wait_frames[player] == 0:
+                player_wait_frames[player] = 2
+            else:
+                player_wait_frames[player] -= 1
+                if player_wait_frames[player] == 0:
+                    sending_data[player] = -1
+                    last_health_data_sent[player] = -1
+                continue
+        elif (
+            last_health_data_sent[player] > 0
+            and last_health_data_sent[player] <= 66
+            and new_health == -1
+        ):
+            if data_filter_tag != "normal_null_error":
+                print("\n")
+                print("New normal null error check...")
+                data_filter_tag = "normal_null_error"
+                player_wait_frames[player] = 0
+            print("\n")
+            print(
+                f"last health bar sent for {player} : {last_health_data_sent[player]}"
+            )
+            print("\n")
+            if player_wait_frames[player] == 0:
+                player_wait_frames[player] = 5
+            else:
+                player_wait_frames[player] -= 1
+                if player_wait_frames[player] == 0:
+                    sending_data[player] = -1
+                    last_health_data_sent[player] = -1
+                continue
+
+        elif (
             last_health_data_sent[player] > 0
             and last_health_data_sent[player] <= 100
             and new_health == -1
         ):
+            if data_filter_tag != "loose_null_error":
+                print("\n")
+                print("New loose null error check...")
+                data_filter_tag = "loose_null_error"
+                player_wait_frames[player] = 0
+            print("\n")
+            print(
+                f"last health bar sent for {player} : {last_health_data_sent[player]}"
+            )
+            print("\n")
             if player_wait_frames[player] == 0:
-                player_wait_frames[player] = 3  # Start the 10-frame countdown
-            if player_wait_frames[player] > 0:
+                player_wait_frames[player] = 10
+            else:
                 player_wait_frames[player] -= 1
-                if player_wait_frames[player] == 1:
-                    player_wait_frames[player] -= 2
-                continue
-            elif player_wait_frames[player] == 0:
-                sending_data[player] = -1  # After 10 frames, set health to -1
-                last_health_data_sent[player] = -1
+                if player_wait_frames[player] == 0:
+                    sending_data[player] = -1
+                    last_health_data_sent[player] = -1
                 continue
 
-        if last_health_data_sent[player] <= 35 and any(
-            percent == new_health for percent in [97, 98, 99, 100]
-        ):
-            if player_recovery_wait_frames[player] == 0:
-                player_recovery_wait_frames[player] = 10
-            if player_recovery_wait_frames[player] > 0:
-                player_recovery_wait_frames[player] -= 1
-                continue
-            elif player_recovery_wait_frames[player] == 0:
-                sending_data[player] = 100
-                last_health_data_sent[player] = 100
-                continue
         elif last_health_data_sent[player] <= 50 and any(
             percent == new_health for percent in [97, 98, 99, 100]
         ):
+            if data_filter_tag != "alive_flicker_error":
+                print("\n")
+                print("New alive flicker error check...")
+                data_filter_tag = "alive_flicker_error"
+                player_recovery_wait_frames[player] = 0
+            print("\n")
+            print(
+                f"last health bar sent for {player} : {last_health_data_sent[player]}"
+            )
+            print("\n")
             if player_recovery_wait_frames[player] == 0:
-                player_recovery_wait_frames[player] = 2
-            if player_recovery_wait_frames[player] > 0:
+                player_recovery_wait_frames[player] = 4
+            else:
                 player_recovery_wait_frames[player] -= 1
+                if player_recovery_wait_frames[player] == 0:
+                    sending_data[player] = 100
+                    last_health_data_sent[player] = 100
                 continue
-            elif player_recovery_wait_frames[player] == 0:
-                sending_data[player] = 100
-                last_health_data_sent[player] = 100
+        elif last_health_data_sent[player] == -1 and new_health == 100:
+            if data_filter_tag != "dead_flicker_error":
+                print("\n")
+                print("New dead flicker error check...")
+                data_filter_tag = "dead_flicker_error"
+                player_dead_wait_frames[player] = 0
+            print("\n")
+            print(
+                f"last health bar sent for {player} : {last_health_data_sent[player]}"
+            )
+            print("\n")
+            if player_dead_wait_frames[player] == 0:
+                player_dead_wait_frames[player] = 10
+            else:
+                player_dead_wait_frames[player] -= 1
+                if player_dead_wait_frames[player] == 0:
+                    sending_data[player] = 100
+                    last_health_data_sent[player] = 100
                 continue
-
-        # Normal case: if health has changed and is not -2, update the health data immediately
-        if last_health_data_sent[player] != new_health and new_health != -2:
+        elif last_health_data_sent[player] != new_health:
             player_wait_frames[player] = 0  # Reset the main wait frames
             player_recovery_wait_frames[player] = 0  # Reset the recovery wait frames
+            player_dead_wait_frames[player] = 0
             sending_data[player] = new_health
             last_health_data_sent[player] = new_health
+        elif last_health_data_sent[player] == new_health:
+            player_wait_frames[player] = 0  # Reset the main wait frames
+            player_recovery_wait_frames[player] = 0  # Reset the recovery wait frames
+            player_dead_wait_frames[player] = 0
 
     if sending_data:
         data_socket.send_json(sending_data)
