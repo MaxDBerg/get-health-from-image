@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import zmq
 import mss
+import math
+from scipy.signal import savgol_filter
 
 context = zmq.Context()
 socket = context.socket(zmq.REP)
@@ -16,19 +18,12 @@ data_socket.bind("tcp://*:5556")
 
 is_running = False
 data_filter_tag = ""
-last_health_data_sent = {
-    "player1": -2,
-    "player2": -2,
-    "player3": -2,
-    "player4": -2,
-    "player5": -2,
-}
-player_wait_frames = {
-    "player1": 0,
-    "player2": 0,
-    "player3": 0,
-    "player4": 0,
-    "player5": 0,
+health_data_buffer = {
+    "player1": [],
+    "player2": [],
+    "player3": [],
+    "player4": [],
+    "player5": [],
 }
 player_recovery_wait_frames = {
     "player1": 0,
@@ -44,19 +39,19 @@ player_dead_wait_frames = {
     "player4": 0,
     "player5": 0,
 }
-player_checked = {
-    "player1": False,
-    "player2": False,
-    "player3": False,
-    "player4": False,
-    "player5": False,
-}
 player_dead = {
     "player1": False,
     "player2": False,
     "player3": False,
     "player4": False,
     "player5": False,
+}
+last_data_bundle = {
+    "player1": 100,
+    "player2": 100,
+    "player3": 100,
+    "player4": 100,
+    "player5": 100,
 }
 
 poller = zmq.Poller()
@@ -163,192 +158,118 @@ def capture_screen(region=None):
 
 
 def send_health_data(health_bars):
-    global last_health_data_sent
-    global player_wait_frames
-    global player_recovery_wait_frames
-    global player_dead_wait_frames
+    global health_data_buffer
     global data_filter_tag
-    global player_checked
     global player_dead
-    health_data = {
+    global last_data_bundle
+    global player_dead_wait_frames
+    global player_recovery_wait_frames
+    new_health_data = {
         "player1": health_bars[0],
         "player2": health_bars[1],
         "player3": health_bars[2],
         "player4": health_bars[3],
         "player5": health_bars[4],
     }
-    sending_data = {}
 
-    for player, new_health in health_data.items():
-        # if player_wait_frames[player] != 0:
-        #     print(f"player wait frames : {player_wait_frames[player]}")
-        if player_recovery_wait_frames[player] != 0:
-            print(
-                f"player recovery wait frames : {player_recovery_wait_frames[player]}"
-            )
-        if player_dead_wait_frames[player] != 0:
-            print(f"player dead wait frames : {player_dead_wait_frames[player]}")
-        # if (
-        #     last_health_data_sent[player] > 0
-        #     and last_health_data_sent[player] <= 33
-        #     and new_health == -1
-        #     and not player_checked[player]
-        # ):
-        #     if data_filter_tag != "strict_null_error":
-        #         print("\n")
-        #         print("New strict null error check...")
-        #         player_checked[player] = False
-        #         data_filter_tag = "strict_null_error"
-        #         player_wait_frames[player] = 0
-        #     print("\n")
-        #     print(
-        #         f"last health bar sent for {player} : {last_health_data_sent[player]}"
-        #     )
-        #     print("\n")
-        #     if player_wait_frames[player] == 0:
-        #         player_wait_frames[player] = 2
-        #     else:
-        #         player_wait_frames[player] -= 1
-        #         if player_wait_frames[player] == 0:
-        #             player_checked[player] = True
-        #         continue
-        # elif (
-        #     last_health_data_sent[player] > 0
-        #     and last_health_data_sent[player] <= 66
-        #     and new_health == -1
-        #     and not player_checked[player]
-        # ):
-        #     if data_filter_tag != "normal_null_error":
-        #         print("\n")
-        #         print("New normal null error check...")
-        #         player_checked[player] = False
-        #         data_filter_tag = "normal_null_error"
-        #         player_wait_frames[player] = 0
-        #     print("\n")
-        #     print(
-        #         f"last health bar sent for {player} : {last_health_data_sent[player]}"
-        #     )
-        #     print("\n")
-        #     if player_wait_frames[player] == 0:
-        #         player_wait_frames[player] = 5
-        #     else:
-        #         player_wait_frames[player] -= 1
-        #         if player_wait_frames[player] == 0:
-        #             player_checked[player] = True
-        #         continue
-
-        # elif (
-        #     last_health_data_sent[player] > 0
-        #     and last_health_data_sent[player] <= 100
-        #     and new_health == -1
-        #     and not player_checked[player]
-        # ):
-        #     if data_filter_tag != "loose_null_error":
-        #         print("\n")
-        #         print("New loose null error check...")
-        #         player_checked[player] = False
-        #         data_filter_tag = "loose_null_error"
-        #         player_wait_frames[player] = 0
-        #     print("\n")
-        #     print(
-        #         f"last health bar sent for {player} : {last_health_data_sent[player]}"
-        #     )
-        #     print("\n")
-        #     if player_wait_frames[player] == 0:
-        #         player_wait_frames[player] = 10
-        #     else:
-        #         player_wait_frames[player] -= 1
-        #         if player_wait_frames[player] == 0:
-        #             player_checked[player] = True
-        #         continue
-
-        # elif (
-        #     last_health_data_sent[player] <= 50
-        #     and any(percent == new_health for percent in [97, 98, 99, 100])
-        #     and not player_checked[player]
-        # ):
-        #     if data_filter_tag != "alive_flicker_error":
-        #         print("\n")
-        #         print("New alive flicker error check...")
-        #         player_checked[player] = False
-        #         data_filter_tag = "alive_flicker_error"
-        #         player_recovery_wait_frames[player] = 0
-        #     print("\n")
-        #     print(
-        #         f"last health bar sent for {player} : {last_health_data_sent[player]}"
-        #     )
-        #     print("\n")
-        #     if player_recovery_wait_frames[player] == 0:
-        #         player_recovery_wait_frames[player] = 5
-        #     else:
-        #         player_recovery_wait_frames[player] -= 1
-        #         if player_recovery_wait_frames[player] == 0:
-        #             player_checked[player] = True
-        #         continue
-
-        if (
-            last_health_data_sent[player] == -1
-            and new_health == -1
-            and not player_dead[player]
-        ):
-            if player_dead_wait_frames[player] == 0:
-                player_dead_wait_frames[player] = 5
-            else:
-                player_dead_wait_frames[player] -= 1
-                if player_dead_wait_frames[player] == 0:
-                    player_dead[player] = True
-                    print(f"{player} is dead")
-                continue
-
-        if last_health_data_sent[player] == -1 and player_dead[player]:
+    for player, new_health in new_health_data.items():
+        if new_health == -1:
+            new_health = 0
+        if last_data_bundle[player] == -1 and player_dead[player]:
             if data_filter_tag != "recovery_flicker_error":
-                print("\n")
-                print("Checking if player is alive...")
                 data_filter_tag = "recovery_flicker_error"
                 player_recovery_wait_frames[player] = 0
-            print("\n")
-            print(
-                f"last health bar sent for {player} : {last_health_data_sent[player]}"
-            )
-            print("\n")
             if player_recovery_wait_frames[player] == 0:
                 player_recovery_wait_frames[player] = 10
             else:
                 player_recovery_wait_frames[player] -= 1
                 if player_recovery_wait_frames[player] == 0:
                     player_dead[player] = False
-                    print(f"{player} is revived")
                 continue
+        if len(health_data_buffer[player]) != 0:
+            if health_data_buffer[player][
+                len(health_data_buffer[player]) - 1
+            ] <= 50 and [
+                95,
+                96,
+                97,
+                98,
+                99,
+            ].__contains__(new_health):
+                health_data_buffer[player].append(
+                    health_data_buffer[player][len(health_data_buffer[player]) - 1]
+                )
+                continue
+            else:
+                health_data_buffer[player].append(new_health)
+        elif [
+            95,
+            96,
+            97,
+            98,
+            99,
+        ].__contains__(new_health) and last_data_bundle[player] <= 50:
+            health_data_buffer[player].append(last_data_bundle[player])
+        else:
+            health_data_buffer[player].append(new_health)
 
-        if last_health_data_sent[player] != new_health and not player_dead[player]:
-            # player_wait_frames[player] = 0  # Reset the main wait frames
-            player_recovery_wait_frames[player] = 0  # Reset the recovery wait frames
-            player_dead_wait_frames[player] = 0
-            sending_data[player] = new_health
-            last_health_data_sent[player] = new_health
+    if len(health_data_buffer["player1"]) >= 3:
+        filtered_health_data = []
+        filtered_health_data.append(
+            math.ceil(sum(savgol_filter(health_data_buffer["player1"], 3, 1)) / 3)
+        )
+        filtered_health_data.append(
+            math.ceil(sum(savgol_filter(health_data_buffer["player2"], 3, 1)) / 3)
+        )
+        filtered_health_data.append(
+            math.ceil(sum(savgol_filter(health_data_buffer["player3"], 3, 1)) / 3)
+        )
+        filtered_health_data.append(
+            math.ceil(sum(savgol_filter(health_data_buffer["player4"], 3, 1)) / 3)
+        )
+        filtered_health_data.append(
+            math.ceil(sum(savgol_filter(health_data_buffer["player5"], 3, 1)) / 3)
+        )
 
-        # elif last_health_data_sent[player] == new_health:
-        #     player_wait_frames[player] = 0  # Reset the main wait frames
-        #     player_recovery_wait_frames[player] = 0  # Reset the recovery wait frames
-        #     player_dead_wait_frames[player] = 0
+        print("\n")
+        print(health_data_buffer)
+        print("\n")
+        print(savgol_filter(health_data_buffer["player5"], 3, 1))
+        print("\n")
+        print(filtered_health_data)
+        print("\n")
 
-    if sending_data:
-        data_socket.send_json(sending_data)
-    print(
-        f"Health percentage for player1: from: {last_health_data_sent['player1']}% to: {health_data['player1']}%"
-    )
-    print(
-        f"Health percentage for player2: from: {last_health_data_sent['player2']}% to: {health_data['player2']}%"
-    )
-    print(
-        f"Health percentage for player3: from: {last_health_data_sent['player3']}% to: {health_data['player3']}%"
-    )
-    print(
-        f"Health percentage for player4: from: {last_health_data_sent['player4']}% to: {health_data['player4']}%"
-    )
-    print(
-        f"Health percentage for player5: from: {last_health_data_sent['player5']}% to: {health_data['player5']}%"
-    )
+        if filtered_health_data[0] == 0:
+            player_dead["player1"] = True
+
+        if filtered_health_data[1] == 0:
+            player_dead["player2"] = True
+
+        if filtered_health_data[2] == 0:
+            player_dead["player3"] = True
+
+        if filtered_health_data[3] == 0:
+            player_dead["player4"] = True
+
+        if filtered_health_data[4] == 0:
+            player_dead["player5"] = True
+
+        data_socket.send(bytearray(filtered_health_data))
+        last_data_bundle = {
+            "player1": filtered_health_data[0],
+            "player2": filtered_health_data[1],
+            "player3": filtered_health_data[2],
+            "player4": filtered_health_data[3],
+            "player5": filtered_health_data[4],
+        }
+        filtered_health_data = []
+        health_data_buffer = {
+            "player1": [],
+            "player2": [],
+            "player3": [],
+            "player4": [],
+            "player5": [],
+        }
 
 
 def handle_null_bar_error(health_bars, null_bar_error, wait_frames_2):
@@ -361,6 +282,7 @@ def handle_null_bar_error(health_bars, null_bar_error, wait_frames_2):
             return True, 5
         elif wait_frames_2 == 0:
             send_health_data(health_bars)
+            return False, 0
         elif wait_frames_2 != 0:
             return True, wait_frames_2 - 1
     return False, 0
@@ -377,7 +299,6 @@ def handle_cv_error(health_bars, standby_process, cv_error, wait_frames):
             return False, True, 5
         elif wait_frames == 0:
             print("Slowing down process cycle...")
-            send_health_data(health_bars)
             return True, False, 0
         elif wait_frames != 0:
             return standby_process, cv_error, wait_frames - 1
@@ -423,7 +344,7 @@ def run_processing_loop():
                 if not null_bar_error and not cv_error and not standby_process:
                     send_health_data(health_bar_percentages)
 
-                time.sleep(0.01)
+                time.sleep(0.001)
 
             else:
                 print("Waiting for start signal...")
