@@ -23,28 +23,55 @@ data_socket.bind("tcp://*:5556")
 executor = ThreadPoolExecutor(max_workers=5)
 is_running = False
 data_filter_tag = ""
-player_regions = [
-    {
-        "health": {"top": 29, "left": 0, "width": 191, "height": 7},
-    },
-    {
-        "health": {"top": 82, "left": 0, "width": 191, "height": 7},
-    },
-    {
-        "health": {"top": 135, "left": 0, "width": 191, "height": 7},
-    },
-    {
-        "health": {"top": 189, "left": 0, "width": 191, "height": 7},
-    },
-    {
-        "health": {"top": 242, "left": 0, "width": 191, "height": 7},
-    },
-]
+player_regions = {
+    "1440": [
+        {
+            "health": {"top": 29, "left": 0, "width": 191, "height": 7},
+        },
+        {
+            "health": {"top": 82, "left": 0, "width": 191, "height": 7},
+        },
+        {
+            "health": {"top": 135, "left": 0, "width": 191, "height": 7},
+        },
+        {
+            "health": {"top": 189, "left": 0, "width": 191, "height": 7},
+        },
+        {
+            "health": {"top": 242, "left": 0, "width": 191, "height": 7},
+        },
+    ],
+    "1080": [
+        {
+            "health": {"top": 0, "left": 0, "width": 143, "height": 5},
+        },
+        {
+            "health": {"top": 40, "left": 0, "width": 143, "height": 5},
+        },
+        {
+            "health": {"top": 80, "left": 0, "width": 143, "height": 5},
+        },
+        {
+            "health": {"top": 120, "left": 0, "width": 143, "height": 5},
+        },
+        {
+            "health": {"top": 160, "left": 0, "width": 143, "height": 5},
+        },
+    ],
+}
 party_region = {
-    "top": 240,
-    "left": 25,
-    "width": 220,
-    "height": 300,
+    "1440": {
+        "top": 240,
+        "left": 25,
+        "width": 220,
+        "height": 300,
+    },
+    "1080": {
+        "top": 202,
+        "left": 19,
+        "width": 160,
+        "height": 170,
+    },
 }
 last_data_bundle = {
     "player1": 100,
@@ -238,20 +265,19 @@ def handle_messages():
         print(f"ZMQError occurred {e}")
 
 
-# Function to capture screen and process ROIs for both health and names
 def capture_and_process():
     global players_data
     players_data = {}
     players_health = []
 
     with mss.mss() as sct:
-        monitor = party_region if party_region else sct.monitors[1]
-        screenshot = np.array(sct.grab(monitor))[
-            :, :, :3
-        ]  # Get screenshot as RGB image
+        monitor = party_region[f"{sct.monitors[1]["height"]}"]
+        screenshot = np.array(sct.grab(monitor))[:, :, :3]
 
-    # Loop through each player's regions, extract name and health bar data
-    for i, regions in enumerate(player_regions, start=1):
+    for i, regions in enumerate(
+        player_regions[f"{sct.monitors[1]["height"]}"],
+        start=1,
+    ):
         health_roi = regions["health"]
 
         health_bar_image = screenshot[
@@ -259,13 +285,14 @@ def capture_and_process():
             health_roi["left"] : health_roi["left"] + health_roi["width"],
         ]
 
+        # cv2.imshow("showing frame", health_bar_image)
+        # cv2.waitKey(0)
+
         health_percent = parse_hp(health_bar_image)
 
         smooth_health_bar_image = cv2.bilateralFilter(health_bar_image, 9, 75, 75)
-        _, buffer = cv2.imencode(
-            ".png", smooth_health_bar_image
-        )  # Compress the image to PNG
-        base64_image = base64.b64encode(buffer).decode("utf-8")  # Convert to base64
+        _, buffer = cv2.imencode(".png", smooth_health_bar_image[0:1, :, :])
+        base64_image = base64.b64encode(buffer).decode("utf-8")
 
         players_data[f"player{i}"] = {
             "health": health_percent,
@@ -283,11 +310,6 @@ def capture_and_process():
 
 def run_processing_loop():
     global is_running
-    # wait_frames = 0
-    # wait_frames_2 = 0
-    # standby_process = False
-    # cv_error = False
-    # null_bar_error = False
     # healer_target_region = {
     #     "top": 850,
     #     "left": 1932,
