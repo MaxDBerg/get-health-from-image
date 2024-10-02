@@ -1,4 +1,5 @@
-from concurrent.futures import ThreadPoolExecutor
+import base64
+import json
 import sys
 import time
 import cv2
@@ -6,8 +7,10 @@ import numpy as np
 import zmq
 import mss
 import math
-import time
+import pytesseract
 from scipy.signal import savgol_filter
+
+pytesseract.pytesseract.tesseract_cmd = "E:\\Tesseract\\tesseract.exe"
 
 context = zmq.Context()
 socket = context.socket(zmq.REP)
@@ -16,9 +19,72 @@ socket.bind("tcp://*:5555")
 data_socket = context.socket(zmq.PUSH)
 data_socket.bind("tcp://*:5556")
 
-executor = ThreadPoolExecutor(max_workers=5)
+
+# Initialize default settings
+settings = {
+    "focus_on_players": False,
+    "use_number_parsing": True,
+    "use_data_filters": False,
+}
 is_running = False
 data_filter_tag = ""
+player_regions = {
+    "1440": [
+        {
+            "health": {"top": 29, "left": 0, "width": 191, "height": 7},
+        },
+        {
+            "health": {"top": 82, "left": 0, "width": 191, "height": 7},
+        },
+        {
+            "health": {"top": 135, "left": 0, "width": 191, "height": 7},
+        },
+        {
+            "health": {"top": 189, "left": 0, "width": 191, "height": 7},
+        },
+        {
+            "health": {"top": 242, "left": 0, "width": 191, "height": 7},
+        },
+    ],
+    "1080": [
+        {
+            "health": {"top": 0, "left": 0, "width": 143, "height": 5},
+        },
+        {
+            "health": {"top": 40, "left": 0, "width": 143, "height": 5},
+        },
+        {
+            "health": {"top": 80, "left": 0, "width": 143, "height": 5},
+        },
+        {
+            "health": {"top": 120, "left": 0, "width": 143, "height": 5},
+        },
+        {
+            "health": {"top": 160, "left": 0, "width": 143, "height": 5},
+        },
+    ],
+}
+party_region = {
+    "1440": {
+        "top": 240,
+        "left": 25,
+        "width": 220,
+        "height": 300,
+    },
+    "1080": {
+        "top": 202,
+        "left": 19,
+        "width": 160,
+        "height": 170,
+    },
+}
+last_data_bundle = {
+    "player1": 100,
+    "player2": 100,
+    "player3": 100,
+    "player4": 100,
+    "player5": 100,
+}
 health_data_buffer = {
     "player1": [],
     "player2": [],
@@ -47,13 +113,7 @@ player_dead = {
     "player4": False,
     "player5": False,
 }
-last_data_bundle = {
-    "player1": 100,
-    "player2": 100,
-    "player3": 100,
-    "player4": 100,
-    "player5": 100,
-}
+players_data = {}
 
 poller = zmq.Poller()
 poller.register(socket, zmq.POLLIN)
@@ -69,7 +129,7 @@ def calculate_health_percentage(resized, contours):
             health_percentage = int((hp_width) * 100 / resized_width)
             return health_percentage
         else:
-            return -1
+            return 0
     return -1
 
 
@@ -83,7 +143,7 @@ def process_grayscale_image(frame):
     if contours:
         return calculate_health_percentage(frame, contours)
 
-    return -1
+    return 0
 
 
 def parse_hp(hp_area):
@@ -96,65 +156,6 @@ def parse_hp(hp_area):
 
     health_data = process_grayscale_image(grayscale_resized)
     return health_data
-
-
-def process_bars(bars):
-    health_percentages = []
-
-    futures = [executor.submit(parse_hp, bar) for bar in bars]
-
-    for future in futures:
-        health_percentages.append(future.result())
-
-    return health_percentages
-
-
-def process_frame(frame):
-    # Constants
-    num_players = 5
-    bar_height = 10
-    bar_width = 191
-    bar_margin = 54
-    x = 0
-
-    bars = []
-    for i in range(num_players):
-        top = i * bar_margin
-        bar = frame[top : top + bar_height, x : x + bar_width].copy()
-        bars.append(bar)
-
-    result = process_bars(bars)
-
-    return result
-
-
-def handle_messages():
-    global is_running
-    try:
-        socks = dict(poller.poll(100))  # 100ms timeout
-        if socket in socks:
-            # Check for a message from Electron
-            print("Waiting for a request...")
-            message = socket.recv().decode("utf-8")
-            print(message)
-            print("Sending reply")
-            socket.send_string("done")
-
-            if message == "start" and not is_running:
-                print("Game focused. Starting capture.")
-                is_running = True
-            elif message == "stop" and is_running:
-                print("Game unfocused. Stopping capture.")
-                is_running = False
-    except zmq.ZMQError as e:
-        print(f"ZMQError occurred {e}")
-
-
-def capture_screen(region=None):
-    with mss.mss() as sct:
-        monitor = region if region else sct.monitors[1]
-        img = np.array(sct.grab(monitor))
-        return img[:, :, :3]
 
 
 def filter_health_data(health_data_buffer):
@@ -172,24 +173,28 @@ def filter_health_data(health_data_buffer):
     return filtered_health_data
 
 
-def send_health_data(health_bars):
-    global health_data_buffer
-    global data_filter_tag
-    global player_dead
-    global last_data_bundle
-    global player_dead_wait_frames
-    global player_recovery_wait_frames
+def send_health_data(players_health):
+    global \
+        health_data_buffer, \
+        data_filter_tag, \
+        player_dead, \
+        last_data_bundle, \
+        player_dead_wait_frames, \
+        player_recovery_wait_frames, \
+        players_data
     new_health_data = {
-        "player1": health_bars[0],
-        "player2": health_bars[1],
-        "player3": health_bars[2],
-        "player4": health_bars[3],
-        "player5": health_bars[4],
+        "player1": players_health[0],
+        "player2": players_health[1],
+        "player3": players_health[2],
+        "player4": players_health[3],
+        "player5": players_health[4],
     }
 
     for player, new_health in new_health_data.items():
         if new_health == -1:
-            new_health = 0
+            print("Error when parsing health!!!!!")
+            health_data_buffer[player].append(last_data_bundle[player])
+            continue
         if last_data_bundle[player] == 0 and player_dead[player]:
             if data_filter_tag != "recovery_flicker_error":
                 data_filter_tag = "recovery_flicker_error"
@@ -204,7 +209,7 @@ def send_health_data(health_bars):
         if len(health_data_buffer[player]) != 0:
             if health_data_buffer[player][
                 len(health_data_buffer[player]) - 1
-            ] <= 50 and [95, 96, 97, 98, 99].__contains__(new_health):
+            ] <= 50 and [95, 96, 97, 98, 99, 100].__contains__(new_health):
                 health_data_buffer[player].append(
                     health_data_buffer[player][len(health_data_buffer[player]) - 1]
                 )
@@ -220,16 +225,6 @@ def send_health_data(health_bars):
 
     if len(health_data_buffer["player1"]) >= 3:
         filtered_health_data = filter_health_data(health_data_buffer)
-        # player1 = math.ceil(min(savgol_filter(health_data_buffer["player1"], 3, 1)))
-        # filtered_health_data.append(player1 if player1 >= 0 else player1 - player1)
-        # player2 = math.ceil(min(savgol_filter(health_data_buffer["player2"], 3, 1)))
-        # filtered_health_data.append(player2 if player2 >= 0 else player2 - player2)
-        # player3 = math.ceil(min(savgol_filter(health_data_buffer["player3"], 3, 1)))
-        # filtered_health_data.append(player3 if player3 >= 0 else player3 - player3)
-        # player4 = math.ceil(min(savgol_filter(health_data_buffer["player4"], 3, 1)))
-        # filtered_health_data.append(player4 if player4 >= 0 else player4 - player4)
-        # player5 = math.ceil(min(savgol_filter(health_data_buffer["player5"], 3, 1)))
-        # filtered_health_data.append(player5 if player5 >= 0 else player5 - player5)
 
         print("\n")
         print(health_data_buffer)
@@ -240,10 +235,8 @@ def send_health_data(health_bars):
         for i, player in enumerate(
             ["player1", "player2", "player3", "player4", "player5"]
         ):
-            if filtered_health_data[i] == 0:
-                player_dead[player] = True
+            players_data[player]["health"] = filtered_health_data[i]
 
-        data_socket.send(bytearray(filtered_health_data))
         last_data_bundle = dict(zip(new_health_data.keys(), filtered_health_data))
         last_data_bundle = {
             "player1": filtered_health_data[0],
@@ -254,81 +247,104 @@ def send_health_data(health_bars):
         }
         for player in health_data_buffer.keys():
             health_data_buffer[player] = []
-
-
-def handle_null_bar_error(health_bars, null_bar_error, wait_frames_2):
-    mutable_health_array = health_bars.copy()
-    mutable_health_array.sort()
-    if all(val == -1 for val in mutable_health_array[:2]):
-        if not null_bar_error and wait_frames_2 == 0:
-            print("Setting wait_frames...")
-            print("Flagged for possible null bar error!")
-            return True, 5
-        elif wait_frames_2 == 0:
-            send_health_data(health_bars)
-            return False, 0
-        elif wait_frames_2 != 0:
-            return True, wait_frames_2 - 1
-    return False, 0
-
-
-def handle_cv_error(health_bars, standby_process, cv_error, wait_frames):
-    if all(percent == 100 for percent in health_bars):
-        if standby_process:
-            print("Process in standby mode...")
-            time.sleep(1)
-            return True, False, 0
-        elif not cv_error and wait_frames == 0:
-            print("Flagged for possible cv error!")
-            return False, True, 5
-        elif wait_frames == 0:
-            print("Slowing down process cycle...")
-            data_socket.send(bytearray(health_bars))
-            return True, False, 0
-        elif wait_frames != 0:
-            return standby_process, cv_error, wait_frames - 1
     else:
-        return False, False, 0
+        for i, player in enumerate(
+            ["player1", "player2", "player3", "player4", "player5"]
+        ):
+            players_data[player]["health"] = last_data_bundle[player]
+
+
+def handle_messages():
+    global is_running, settings
+    try:
+        socks = dict(poller.poll(100))  # 100ms timeout
+        if socket in socks:
+            message = socket.recv().decode("utf-8")
+            print("Received message:", message)
+
+            message_json = json.loads(message)
+            if message_json["type"] == "settings":
+                settings = message_json["data"]
+                print("Settings updated:", settings)
+                socket.send_string("settings_updated")
+            elif (
+                message_json["type"] == "run-state" and message_json["data"] == "start"
+            ):
+                is_running = True
+                socket.send_string("done")
+            elif message_json["type"] == "run-state" and message_json["data"] == "stop":
+                is_running = False
+                socket.send_string("done")
+    except zmq.ZMQError as e:
+        print(f"ZMQError occurred {e}")
+
+
+def capture_and_process():
+    global players_data
+    players_data = {}
+    players_health = []
+
+    with mss.mss() as sct:
+        monitor = party_region[f"{sct.monitors[1]["height"]}"]
+        screenshot = np.array(sct.grab(monitor))[:, :, :3]
+
+    for i, regions in enumerate(
+        player_regions[f"{sct.monitors[1]["height"]}"],
+        start=1,
+    ):
+        health_roi = regions["health"]
+
+        health_bar_image = screenshot[
+            health_roi["top"] : health_roi["top"] + health_roi["height"],
+            health_roi["left"] : health_roi["left"] + health_roi["width"],
+        ]
+
+        # cv2.imshow("showing frame", health_bar_image)
+        # cv2.waitKey(0)
+
+        if settings["use_number_parsing"]:
+            health_percent = parse_hp(health_bar_image)
+        else:
+            health_percent = -1
+
+        smooth_health_bar_image = cv2.bilateralFilter(health_bar_image, 9, 75, 75)
+        _, buffer = cv2.imencode(".png", smooth_health_bar_image[0:1, :, :])
+        base64_image = base64.b64encode(buffer).decode("utf-8")
+
+        players_data[f"player{i}"] = {
+            "health": health_percent,
+            "image": base64_image,
+        }
+
+    for i, player in enumerate(["player1", "player2", "player3", "player4", "player5"]):
+        players_health.append(players_data[player]["health"])
+
+    if settings["use_number_parsing"] and settings["use_data_filters"]:
+        send_health_data(players_health)
+
+    json_data = json.dumps(players_data)
+    data_socket.send_string(json_data)
 
 
 def run_processing_loop():
     global is_running
-    wait_frames = 0
-    wait_frames_2 = 0
-    standby_process = False
-    cv_error = False
-    null_bar_error = False
-    party_region = {
-        "top": 268,
-        "left": 25,
-        "width": 220,
-        "height": 300,
-    }
     # healer_target_region = {
     #     "top": 850,
     #     "left": 1932,
     #     "width": 264,
     #     "height": 80,
     # }
+
     while True:
         try:
             handle_messages()
             if is_running:
                 start_time = time.time()
-                frame = capture_screen(region=party_region)
                 # target_frame = capture_screen(region=healer_target_region)
-                # cv2.imshow("showing frame", target_frame)
+                capture_and_process()
+                # cv2.imshow("showing frame", health_bars[0])
                 # cv2.waitKey(0)
-                health_bar_percentages = process_frame(frame)
-                null_bar_error, wait_frames_2 = handle_null_bar_error(
-                    health_bar_percentages, null_bar_error, wait_frames_2
-                )
-                standby_process, cv_error, wait_frames = handle_cv_error(
-                    health_bar_percentages, standby_process, cv_error, wait_frames
-                )
 
-                if not null_bar_error and not cv_error and not standby_process:
-                    send_health_data(health_bar_percentages)
                 end_time = time.time()
                 print(f"Slow as shit : {(end_time - start_time)} seconds")
             else:
