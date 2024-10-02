@@ -1,5 +1,4 @@
 import base64
-from concurrent.futures import ThreadPoolExecutor
 import json
 import sys
 import time
@@ -20,7 +19,13 @@ socket.bind("tcp://*:5555")
 data_socket = context.socket(zmq.PUSH)
 data_socket.bind("tcp://*:5556")
 
-executor = ThreadPoolExecutor(max_workers=5)
+
+# Initialize default settings
+settings = {
+    "focus_on_players": False,
+    "use_number_parsing": True,
+    "use_data_filters": False,
+}
 is_running = False
 data_filter_tag = ""
 player_regions = {
@@ -169,13 +174,14 @@ def filter_health_data(health_data_buffer):
 
 
 def send_health_data(players_health):
-    global health_data_buffer
-    global data_filter_tag
-    global player_dead
-    global last_data_bundle
-    global player_dead_wait_frames
-    global player_recovery_wait_frames
-    global players_data
+    global \
+        health_data_buffer, \
+        data_filter_tag, \
+        player_dead, \
+        last_data_bundle, \
+        player_dead_wait_frames, \
+        player_recovery_wait_frames, \
+        players_data
     new_health_data = {
         "player1": players_health[0],
         "player2": players_health[1],
@@ -203,7 +209,7 @@ def send_health_data(players_health):
         if len(health_data_buffer[player]) != 0:
             if health_data_buffer[player][
                 len(health_data_buffer[player]) - 1
-            ] <= 50 and [95, 96, 97, 98, 99].__contains__(new_health):
+            ] <= 50 and [95, 96, 97, 98, 99, 100].__contains__(new_health):
                 health_data_buffer[player].append(
                     health_data_buffer[player][len(health_data_buffer[player]) - 1]
                 )
@@ -241,26 +247,34 @@ def send_health_data(players_health):
         }
         for player in health_data_buffer.keys():
             health_data_buffer[player] = []
+    else:
+        for i, player in enumerate(
+            ["player1", "player2", "player3", "player4", "player5"]
+        ):
+            players_data[player]["health"] = last_data_bundle[player]
 
 
 def handle_messages():
-    global is_running
+    global is_running, settings
     try:
         socks = dict(poller.poll(100))  # 100ms timeout
         if socket in socks:
-            # Check for a message from Electron
-            print("Waiting for a request...")
             message = socket.recv().decode("utf-8")
-            print(message)
-            print("Sending reply")
-            socket.send_string("done")
+            print("Received message:", message)
 
-            if message == "start" and not is_running:
-                print("Game focused. Starting capture.")
+            message_json = json.loads(message)
+            if message_json["type"] == "settings":
+                settings = message_json["data"]
+                print("Settings updated:", settings)
+                socket.send_string("settings_updated")
+            elif (
+                message_json["type"] == "run-state" and message_json["data"] == "start"
+            ):
                 is_running = True
-            elif message == "stop" and is_running:
-                print("Game unfocused. Stopping capture.")
+                socket.send_string("done")
+            elif message_json["type"] == "run-state" and message_json["data"] == "stop":
                 is_running = False
+                socket.send_string("done")
     except zmq.ZMQError as e:
         print(f"ZMQError occurred {e}")
 
@@ -288,7 +302,10 @@ def capture_and_process():
         # cv2.imshow("showing frame", health_bar_image)
         # cv2.waitKey(0)
 
-        health_percent = parse_hp(health_bar_image)
+        if settings["use_number_parsing"]:
+            health_percent = parse_hp(health_bar_image)
+        else:
+            health_percent = -1
 
         smooth_health_bar_image = cv2.bilateralFilter(health_bar_image, 9, 75, 75)
         _, buffer = cv2.imencode(".png", smooth_health_bar_image[0:1, :, :])
@@ -302,7 +319,8 @@ def capture_and_process():
     for i, player in enumerate(["player1", "player2", "player3", "player4", "player5"]):
         players_health.append(players_data[player]["health"])
 
-    send_health_data(players_health)
+    if settings["use_number_parsing"] and settings["use_data_filters"]:
+        send_health_data(players_health)
 
     json_data = json.dumps(players_data)
     data_socket.send_string(json_data)
